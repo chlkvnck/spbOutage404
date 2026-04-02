@@ -153,6 +153,14 @@ class SpikeResult:
     spike_type: str = ""  # "fast", "slow", "absolute"
 
 
+@dataclass
+class RecoveryResult:
+    is_recovery: bool = False
+    recovery_type: str = ""  # "partial", "full"
+    avg_30m_current: float = 0
+    avg_30m_prev: float = 0
+
+
 def detect_spike(complaints: list[int]) -> SpikeResult:
     """
     Анализирует массив точек и определяет, есть ли всплеск.
@@ -202,6 +210,40 @@ def detect_spike(complaints: list[int]) -> SpikeResult:
             result.alerts.append(
                 f"🔴 Аномалия: {current} жалоб (норма была ~{avg_1h_before:.0f})"
             )
+
+    return result
+
+
+def detect_recovery(complaints: list[int]) -> RecoveryResult:
+    """
+    Детектирует падение активности (восстановление после сбоя).
+
+    Логика:
+      Среднее за последние 30 мин vs среднее за предыдущие 30 мин.
+      Если текущее меньше на 20%+ — восстановление.
+      Тип:
+        "partial" — текущее среднее ещё >= 100
+        "full"    — текущее среднее < 100
+    """
+    result = RecoveryResult()
+    # нужно минимум 12 точек (1 час данных)
+    if len(complaints) < 12:
+        return result
+
+    avg_30m_current = sum(complaints[-6:]) / 6    # последние 30 мин
+    avg_30m_prev = sum(complaints[-12:-6]) / 6    # предыдущие 30 мин
+
+    if avg_30m_prev <= 0:
+        return result
+
+    drop_ratio = avg_30m_current / avg_30m_prev
+
+    # падение на 20%+ (ratio < 0.8) и предыдущий период был значимым
+    if drop_ratio <= 0.8 and avg_30m_prev >= 50:
+        result.is_recovery = True
+        result.avg_30m_current = avg_30m_current
+        result.avg_30m_prev = avg_30m_prev
+        result.recovery_type = "full" if avg_30m_current < 100 else "partial"
 
     return result
 
@@ -291,18 +333,29 @@ def render_graph(complaints: list[int], errors: list[float],
     return buf
 
 
-# ─── ЕБАНУЛИ-генератор ────────────────────────────────────────────────
+# ─── Генераторы шапок ────────────────────────────────────────────────
 
 CHAOS_EMOJI = ["🔥", "💥", "🚨", "⚠️", "☠️", "🤯", "😱", "🫠", "💀", "🌋"]
+NEUTRAL_EMOJI = ["😐", "🙄", "😑", "🤔", "😶", "🫤", "😒", "🧐", "😮‍💨", "🫥"]
+RELIEF_EMOJI = ["🌿", "🍃", "💚", "🌬️", "🌱", "😮‍💨", "🫁", "☁️", "🕊️", "🌊"]
 
 
 def chaos_header() -> str:
-    """Генерирует случайную хаос-шапку."""
     e1, e2 = random.sample(CHAOS_EMOJI, 2)
     return f"{e1} ЕБАНУЛИ!!! {e2}"
 
 
-def format_caption(complaints: list[int], spike: SpikeResult) -> str:
+def recovery_header(recovery_type: str) -> str:
+    if recovery_type == "partial":
+        emojis = random.sample(NEUTRAL_EMOJI, 4)
+        return f"{''.join(emojis)} УДАВКУ ОСЛАБИЛИ... {''.join(random.sample(NEUTRAL_EMOJI, 4))}"
+    else:
+        emojis = random.sample(RELIEF_EMOJI, 4)
+        return f"{''.join(emojis)} ДАЛИ ПОДЫШАТЬ!!! {''.join(random.sample(RELIEF_EMOJI, 4))}"
+
+
+def format_caption(complaints: list[int], spike: SpikeResult,
+                   recovery: RecoveryResult | None = None) -> str:
     current = complaints[-1]
     peak = max(complaints)
     avg_15m = sum(complaints[-3:]) / 3 if len(complaints) >= 3 else current
@@ -315,6 +368,15 @@ def format_caption(complaints: list[int], spike: SpikeResult) -> str:
         lines.append("")
         for a in spike.alerts:
             lines.append(a)
+        lines.append("")
+    elif recovery and recovery.is_recovery:
+        lines.append(recovery_header(recovery.recovery_type))
+        lines.append("")
+        drop_pct = int((1 - recovery.avg_30m_current / recovery.avg_30m_prev) * 100)
+        lines.append(
+            f"Среднее за полчаса: {recovery.avg_30m_prev:.0f} → {recovery.avg_30m_current:.0f} "
+            f"(−{drop_pct}%)"
+        )
         lines.append("")
 
     lines.append(f"Жалоб сейчас: {current}")
@@ -330,10 +392,11 @@ def format_caption(complaints: list[int], spike: SpikeResult) -> str:
 # ─── Фоновый мониторинг → канал ──────────────────────────────────────
 
 last_alert_time: datetime | None = None
+last_recovery_time: datetime | None = None
 
 
 async def poll_loop(app):
-    global last_alert_time
+    global last_alert_time, last_recovery_time
 
     if not CHANNEL_ID:
         log.info("CHANNEL_ID не задан — фоновый мониторинг выключен")
@@ -350,14 +413,14 @@ async def poll_loop(app):
 
             complaints, errors = result
             spike = detect_spike(complaints)
+            recovery = detect_recovery(complaints)
+            now = datetime.now(MSK)
 
             if spike.is_spike:
-                now = datetime.now(MSK)
                 cooldown_ok = (
                     last_alert_time is None
                     or (now - last_alert_time) > timedelta(minutes=ALERT_COOLDOWN_MIN)
                 )
-
                 if cooldown_ok:
                     buf = render_graph(complaints, errors, spike)
                     caption = format_caption(complaints, spike)
@@ -374,6 +437,32 @@ async def poll_loop(app):
                 else:
                     remaining = ALERT_COOLDOWN_MIN - (now - last_alert_time).seconds // 60
                     log.info("Cooldown (%d мин): %s", remaining, spike.alerts)
+
+            elif recovery.is_recovery:
+                cooldown_ok = (
+                    last_recovery_time is None
+                    or (now - last_recovery_time) > timedelta(minutes=ALERT_COOLDOWN_MIN)
+                )
+                if cooldown_ok:
+                    buf = render_graph(complaints, errors)
+                    caption = format_caption(complaints, SpikeResult(), recovery)
+                    try:
+                        await app.bot.send_photo(
+                            chat_id=CHANNEL_ID,
+                            photo=buf,
+                            caption=caption,
+                        )
+                        last_recovery_time = now
+                        log.info(
+                            "Recovery в канал: %s → %s (%s)",
+                            recovery.avg_30m_prev, recovery.avg_30m_current,
+                            recovery.recovery_type,
+                        )
+                    except Exception as e:
+                        log.error("Ошибка публикации recovery: %s", e)
+                else:
+                    log.info("Recovery cooldown, пропускаем")
+
             else:
                 log.debug("Норма: %d жалоб", complaints[-1])
 
