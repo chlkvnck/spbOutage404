@@ -347,11 +347,11 @@ def chaos_header() -> str:
 
 def recovery_header(recovery_type: str) -> str:
     if recovery_type == "partial":
-        emojis = random.sample(NEUTRAL_EMOJI, 4)
-        return f"{''.join(emojis)} УДАВКУ ОСЛАБИЛИ... {''.join(random.sample(NEUTRAL_EMOJI, 4))}"
+        e1, e2 = random.sample(NEUTRAL_EMOJI, 2)
+        return f"{e1} УДАВКУ ОСЛАБИЛИ... {e2}"
     else:
-        emojis = random.sample(RELIEF_EMOJI, 4)
-        return f"{''.join(emojis)} ДАЛИ ПОДЫШАТЬ!!! {''.join(random.sample(RELIEF_EMOJI, 4))}"
+        e1, e2 = random.sample(RELIEF_EMOJI, 2)
+        return f"{e1} ДАЛИ ПОДЫШАТЬ!!! {e2}"
 
 
 def format_caption(complaints: list[int], spike: SpikeResult,
