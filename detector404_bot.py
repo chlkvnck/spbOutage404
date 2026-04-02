@@ -45,7 +45,6 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
 SERVICE_NAME = "[78] Санкт-Петербург"
 DATA_URL = "https://detector404.ru/data.js?service={}&summ=15"
-PAGE_URL = "https://detector404.ru/78-sankt-peterburg"
 
 POLL_INTERVAL = 300       # 5 минут между проверками
 POINT_INTERVAL = 300      # 5 минут между точками графика
@@ -185,21 +184,23 @@ def detect_spike(complaints: list[int]) -> SpikeResult:
     if current >= FAST_SPIKE_MIN and prev > 0:
         ratio = current / prev
         if ratio >= FAST_SPIKE_RATIO:
+            pct = int((ratio - 1) * 100)
             result.is_spike = True
             result.spike_type = "fast"
             result.alerts.append(
-                f"⚡ Быстрый скачок: {prev} → {current} (×{ratio:.1f} за 5 мин)"
+                f"Быстрый скачок: {prev} → {current} (+{pct}% за 5 мин)"
             )
 
     # 2. Медленный всплеск
     if avg_15m >= SLOW_SPIKE_MIN and avg_1h_before > 0:
         ratio = avg_15m / avg_1h_before
         if ratio >= SLOW_SPIKE_RATIO:
+            pct = int((ratio - 1) * 100)
             result.is_spike = True
             result.spike_type = result.spike_type or "slow"
             result.alerts.append(
                 f"📈 Медленный рост: среднее {avg_1h_before:.0f} → {avg_15m:.0f} "
-                f"(×{ratio:.1f} за 15 мин vs час)"
+                f"(+{pct}% за 15 мин vs час)"
             )
 
     # 3. Абсолютный порог
@@ -358,7 +359,6 @@ def format_caption(complaints: list[int], spike: SpikeResult,
                    recovery: RecoveryResult | None = None) -> str:
     current = complaints[-1]
     peak = max(complaints)
-    avg_15m = sum(complaints[-3:]) / 3 if len(complaints) >= 3 else current
     avg_1h = sum(complaints[-12:]) / 12 if len(complaints) >= 12 else current
 
     lines = []
@@ -380,11 +380,9 @@ def format_caption(complaints: list[int], spike: SpikeResult,
         lines.append("")
 
     lines.append(f"Жалоб сейчас: {current}")
-    lines.append(f"Среднее за 15 мин: {avg_15m:.0f}")
     lines.append(f"Среднее за час: {avg_1h:.0f}")
-    lines.append(f"Пик за 24ч: {peak}")
+    lines.append(f"Пик за сегодня: {peak}")
     lines.append("")
-    lines.append(PAGE_URL)
 
     return "\n".join(lines)
 
