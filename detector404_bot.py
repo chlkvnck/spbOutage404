@@ -389,13 +389,13 @@ def format_caption(complaints: list[int], spike: SpikeResult,
 
 # ─── Фоновый мониторинг → канал ──────────────────────────────────────
 
+# Состояния инцидента: "normal" → "incident" → "declining" → "normal"
 last_alert_time: datetime | None = None
-last_recovery_time: datetime | None = None
-is_recovering: bool = False
+incident_state: str = "normal"  # "normal", "incident", "declining"
 
 
 async def poll_loop(app):
-    global last_alert_time, last_recovery_time, is_recovering
+    global last_alert_time, incident_state
 
     if not CHANNEL_ID:
         log.info("CHANNEL_ID не задан — фоновый мониторинг выключен")
@@ -416,32 +416,37 @@ async def poll_loop(app):
             now = datetime.now(MSK)
 
             if spike.is_spike:
-                cooldown_ok = (
-                    last_alert_time is None
-                    or (now - last_alert_time) > timedelta(minutes=ALERT_COOLDOWN_MIN)
-                )
-                if cooldown_ok:
-                    buf = render_graph(complaints, errors, spike)
-                    caption = format_caption(complaints, spike)
-                    try:
-                        await app.bot.send_photo(
-                            chat_id=CHANNEL_ID,
-                            photo=buf,
-                            caption=caption,
-                        )
-                        last_alert_time = now
-                        is_recovering = False  # новый инцидент — сбрасываем флаг
-                        log.info("Алерт в канал: %s", spike.alerts)
-                    except Exception as e:
-                        log.error("Ошибка публикации: %s", e)
-                else:
-                    remaining = ALERT_COOLDOWN_MIN - (now - last_alert_time).seconds // 60
-                    log.info("Cooldown (%d мин): %s", remaining, spike.alerts)
+                if incident_state == "normal":
+                    # Новый инцидент — шлём ЕБАНУЛИ
+                    cooldown_ok = (
+                        last_alert_time is None
+                        or (now - last_alert_time) > timedelta(minutes=ALERT_COOLDOWN_MIN)
+                    )
+                    if cooldown_ok:
+                        buf = render_graph(complaints, errors, spike)
+                        caption = format_caption(complaints, spike)
+                        try:
+                            await app.bot.send_photo(
+                                chat_id=CHANNEL_ID,
+                                photo=buf,
+                                caption=caption,
+                            )
+                            last_alert_time = now
+                            incident_state = "incident"
+                            log.info("Алерт в канал: %s", spike.alerts)
+                        except Exception as e:
+                            log.error("Ошибка публикации: %s", e)
+                    else:
+                        remaining = ALERT_COOLDOWN_MIN - (now - last_alert_time).seconds // 60
+                        log.info("Cooldown (%d мин): %s", remaining, spike.alerts)
+                elif incident_state in ("incident", "declining"):
+                    # Повторный всплеск во время инцидента/спада — сбрасываем в incident
+                    incident_state = "incident"
+                    log.info("Повторный spike во время инцидента, state → incident")
 
             elif recovery.is_recovery:
-                if is_recovering:
-                    log.info("Уже восстанавливаемся, пропускаем recovery")
-                else:
+                if incident_state == "incident" and recovery.recovery_type == "partial":
+                    # Первое падение, ещё >= 100 → УДАВКУ ОСЛАБИЛИ
                     buf = render_graph(complaints, errors)
                     caption = format_caption(complaints, SpikeResult(), recovery)
                     try:
@@ -450,15 +455,26 @@ async def poll_loop(app):
                             photo=buf,
                             caption=caption,
                         )
-                        last_recovery_time = now
-                        is_recovering = True
-                        log.info(
-                            "Recovery в канал: %s → %s (%s)",
-                            recovery.avg_30m_prev, recovery.avg_30m_current,
-                            recovery.recovery_type,
-                        )
+                        incident_state = "declining"
+                        log.info("УДАВКУ ОСЛАБИЛИ: %s → %s", recovery.avg_30m_prev, recovery.avg_30m_current)
                     except Exception as e:
                         log.error("Ошибка публикации recovery: %s", e)
+                elif incident_state in ("incident", "declining") and recovery.recovery_type == "full":
+                    # Упало ниже 100 → ДАЛИ ПОДЫШАТЬ, инцидент закрыт
+                    buf = render_graph(complaints, errors)
+                    caption = format_caption(complaints, SpikeResult(), recovery)
+                    try:
+                        await app.bot.send_photo(
+                            chat_id=CHANNEL_ID,
+                            photo=buf,
+                            caption=caption,
+                        )
+                        incident_state = "normal"
+                        log.info("ДАЛИ ПОДЫШАТЬ: %s → %s", recovery.avg_30m_prev, recovery.avg_30m_current)
+                    except Exception as e:
+                        log.error("Ошибка публикации recovery: %s", e)
+                else:
+                    log.info("Recovery пропущен (state=%s, type=%s)", incident_state, recovery.recovery_type)
 
             else:
                 log.debug("Норма: %d жалоб", complaints[-1])
