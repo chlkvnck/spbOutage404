@@ -391,10 +391,11 @@ def format_caption(complaints: list[int], spike: SpikeResult,
 
 last_alert_time: datetime | None = None
 last_recovery_time: datetime | None = None
+is_recovering: bool = False
 
 
 async def poll_loop(app):
-    global last_alert_time, last_recovery_time
+    global last_alert_time, last_recovery_time, is_recovering
 
     if not CHANNEL_ID:
         log.info("CHANNEL_ID не задан — фоновый мониторинг выключен")
@@ -429,6 +430,7 @@ async def poll_loop(app):
                             caption=caption,
                         )
                         last_alert_time = now
+                        is_recovering = False  # новый инцидент — сбрасываем флаг
                         log.info("Алерт в канал: %s", spike.alerts)
                     except Exception as e:
                         log.error("Ошибка публикации: %s", e)
@@ -437,11 +439,9 @@ async def poll_loop(app):
                     log.info("Cooldown (%d мин): %s", remaining, spike.alerts)
 
             elif recovery.is_recovery:
-                cooldown_ok = (
-                    last_recovery_time is None
-                    or (now - last_recovery_time) > timedelta(minutes=ALERT_COOLDOWN_MIN)
-                )
-                if cooldown_ok:
+                if is_recovering:
+                    log.info("Уже восстанавливаемся, пропускаем recovery")
+                else:
                     buf = render_graph(complaints, errors)
                     caption = format_caption(complaints, SpikeResult(), recovery)
                     try:
@@ -451,6 +451,7 @@ async def poll_loop(app):
                             caption=caption,
                         )
                         last_recovery_time = now
+                        is_recovering = True
                         log.info(
                             "Recovery в канал: %s → %s (%s)",
                             recovery.avg_30m_prev, recovery.avg_30m_current,
@@ -458,8 +459,6 @@ async def poll_loop(app):
                         )
                     except Exception as e:
                         log.error("Ошибка публикации recovery: %s", e)
-                else:
-                    log.info("Recovery cooldown, пропускаем")
 
             else:
                 log.debug("Норма: %d жалоб", complaints[-1])
